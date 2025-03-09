@@ -1,22 +1,29 @@
 //! A library for interpreting D&D-style dice notation
-//! # Example
-//! ```
-//! let text = "2d6 - 1d8 + 10"
-//! let mut parser = sdi::Parser::from_text(text);
-//! let ast = parser.parse();
-//! let result = ast.eval();
-//! println("you rolled a {:?}");
-//! ```
-
 use rand::prelude::*;
+use std::collections::HashMap;
 
-fn roll(count: usize, size: usize) -> usize {
-    let mut result = 0;
+pub fn roll(not: impl Into<String>) -> EvalResult {
+    let mut parser = Parser::from_text(not);
+    let ast = parser.parse();
+    ast.eval()
+}
+
+fn roll_single(count: usize, size: usize) -> EvalResult {
     let mut rng = thread_rng();
+    // do the roll `count` times
+    let mut rolls = Vec::new();
+    let mut total = 0;
     for _ in 0..count {
-        result += rng.gen_range(1..=size);
+        let roll: usize = rng.gen_range(1..=size);
+        rolls.push(roll);
+        total += roll;
     }
-    result
+    let mut hmap = HashMap::new();
+    hmap.insert(size, rolls);
+    EvalResult {
+        total: total as isize,
+        rolls: hmap
+    }
 }
 
 
@@ -38,7 +45,7 @@ pub enum Token {
     /// The right parentheses ')'
     RPAREN,
     /// The 'd' character
-    DICE
+    DICE,
 }
 
 /// The Lexer converts from a string to a vector of tokens (tokenization)
@@ -163,12 +170,104 @@ pub enum Node {
     /// A leaf node means a literal (no operator is executed on
     /// the value)
     /// * `value` - the value of the leaf node (usually an integer literal)
-    Leaf {value: Token}
+    Leaf {value: Token},
+}
+
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            Self::BinOp { lhs, op, rhs } => {
+                if let Self::BinOp { lhs: olhs, op: oop, rhs: orhs } = other {
+                    return lhs == olhs && op == oop && rhs == orhs;
+                }
+            }
+            Self::UnOp { op, child } => {
+                if let Self::UnOp { op: oop, child: ochild } = other {
+                    return op == oop && child == ochild;
+                }
+            },
+            Self::Leaf { value } => {
+                if let Self::Leaf { value: ovalue } = other {
+                    return value == ovalue;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct EvalResult {
+    //             type   each roll
+    rolls: HashMap<usize, Vec<usize>>,
+    total: isize
+}
+
+fn merge_hashmap(a: HashMap<usize, Vec<usize>>, b: HashMap<usize, Vec<usize>>) -> HashMap<usize, Vec<usize>> {
+    let mut result = HashMap::new();
+    for (key, value) in a.iter() {
+        result.insert(*key, value.clone());
+    }
+    for (key, value) in b.iter() {
+        if let Some(v) = result.get_mut(key) {
+            v.extend(value);
+        } else {
+            result.insert(*key, value.clone());
+        }
+    }
+    result
+}
+
+use std::ops::{Add, Neg, Sub, Mul, Div};
+impl Neg for EvalResult {
+    fn neg(self) -> Self::Output {
+        EvalResult {
+            rolls: self.rolls,
+            total: - self.total
+        }
+    }
+    type Output = Self;
+}
+impl Add for EvalResult {
+    fn add(self, rhs: Self) -> Self::Output {
+        EvalResult {
+            rolls: merge_hashmap(self.rolls, rhs.rolls),
+            total: self.total + rhs.total
+        }
+    }
+    type Output = Self;
+}
+impl Sub for EvalResult {
+    fn sub(self, rhs: Self) -> Self::Output {
+        EvalResult {
+            rolls: merge_hashmap(self.rolls, rhs.rolls),
+            total: self.total - rhs.total
+        }
+    }
+    type Output = Self;
+}
+impl Mul for EvalResult {
+    fn mul(self, rhs: Self) -> Self::Output {
+        EvalResult {
+            rolls: merge_hashmap(self.rolls, rhs.rolls),
+            total: self.total - rhs.total
+        }
+    }
+    type Output = Self;
+}
+impl Div for EvalResult {
+    fn div(self, rhs: Self) -> Self::Output {
+        EvalResult {
+            rolls: merge_hashmap(self.rolls, rhs.rolls),
+            total: self.total - rhs.total
+        }
+    }
+    type Output = Self;
 }
 
 impl Node {
     /// Evaluate the AST with this node as the root node.
-    pub fn eval(&self) -> isize {
+    pub fn eval(&self) -> EvalResult {
         let result = match &self {
             Self::BinOp { lhs, op, rhs } => {
                 match &op {
@@ -185,10 +284,12 @@ impl Node {
                         lhs.eval() / rhs.eval()
                     },
                     Token::DICE => {
-                        let count = lhs.eval();
-                        let size = rhs.eval();
+                        let lhse = lhs.eval();
+                        let rhse = rhs.eval();
+                        let count = lhse.total;
+                        let size = rhse.total;
                         assert!(count > 0 && size > 0);
-                        roll(count as usize, size as usize) as isize
+                        roll_single(count as usize, size as usize)
                     },
                     _ => {unreachable!()}
                 }
@@ -199,16 +300,19 @@ impl Node {
                         -child.eval()
                     },
                     Token::DICE => {
-                        let size = child.eval();
+                        let size = child.eval().total;
                         assert!(size > 0);
-                        roll(1, size as usize) as isize
+                        roll_single(1, size as usize)
                     }
                     _ => {unreachable!()}
                 }
             },
             Self::Leaf { value } => {
                 if let Token::INT(v) = value {
-                    *v as isize
+                    EvalResult {
+                        rolls: HashMap::new(),
+                        total: *v as isize
+                    }
                 } else {
                     unreachable!()
                 }
@@ -321,5 +425,54 @@ impl Parser {
     /// Parse the text
     pub fn parse(&mut self) -> Node {
         self.expr()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{*, Node::*, Token::*};
+    #[test]
+    fn parse_roll() {
+        let input = "1d4";
+        let expected_output = BinOp {
+            lhs: Box::new(Leaf {
+                value: INT(1)
+            }),
+            op: DICE,
+            rhs: Box::new(Leaf {
+                value: INT(4)
+            })
+        };
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let ast = parser.parse();
+        assert_eq!(ast, expected_output);
+    }
+
+    #[test]
+    fn parse_basic_op() {
+        let input = "1 + 2 * 3 / 4 - 5";
+        let expected_output = BinOp {
+            lhs: Box::new(BinOp {
+                lhs: Box::new(Leaf { value: INT(1) }),
+                op: ADD,
+                rhs: Box::new(BinOp {
+                    lhs: Box::new(BinOp {
+                        lhs: Box::new(Leaf { value: INT(2) }),
+                        op: MUL,
+                        rhs: Box::new(Leaf { value: INT(3) })
+                    }),
+                    op: DIV,
+                    rhs: Box::new(Leaf { value: INT(4) })
+                })
+            }),
+            op: SUB,
+            rhs: Box::new(Leaf { value: INT(5) })
+        };
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let ast = parser.parse();
+        println!("{:?}", ast);
+        assert_eq!(ast, expected_output);
     }
 }

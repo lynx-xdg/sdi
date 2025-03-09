@@ -1,5 +1,5 @@
 fn main() {
-    let text = "-1 + 4 * 2 + 43d51 * 4";
+    let text = "2d4 + 7d5";
     println!("{:?}", text);
     let mut lexer = sdi::Lexer::new(text);
     loop {
@@ -10,9 +10,6 @@ fn main() {
         }
     }
     println!();
-    let lexer = sdi::Lexer::new(text);
-    let mut parser = sdi::Parser::new(lexer);
-    let node = parser.parse();
+    let node = sdi::roll(text);
     println!("{:?}", node);
-    println!("{:?}", node.eval());
 }
